@@ -230,7 +230,7 @@ irqreturn_t my_irq_handler(int irq, void *dev)
 
         unsigned char mesage[SYMMETRIC_KEY_LENGTH];
 
-        sprintf((char *)mesage, "MyWorkQueue: key code is %d", code);
+        sprintf((char *)mesage, "%d", code);
         
         test_skcipher_encrypt((char *)mesage, password, &sk);
 
@@ -249,8 +249,6 @@ static int __init my_workqueue_init(void)
 {
     int ret;
     
-
-
     sk.tfm = NULL;
     sk.req = NULL;
     sk.scratchpad = NULL;
