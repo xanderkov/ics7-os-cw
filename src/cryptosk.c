@@ -6,6 +6,18 @@
 #include <linux/module.h>
 #include <linux/random.h>
 #include <linux/scatterlist.h>
+
+#include <linux/kernel.h>
+#include <linux/interrupt.h>
+#include <linux/slab.h>
+#include <asm/io.h>
+#include <linux/stddef.h>
+#include <linux/workqueue.h>
+#include <linux/delay.h>
+
+
+#include "my_ascii.h"
+
  
 #define SYMMETRIC_KEY_LENGTH 32
 #define CIPHER_BLOCK_SIZE 16
@@ -26,6 +38,21 @@ struct skcipher_def {
 };
  
 static struct skcipher_def sk;
+
+typedef struct
+{
+    struct work_struct work;
+    int code;
+} my_work_struct_t;
+
+static struct workqueue_struct *my_wq;
+
+static my_work_struct_t *work1;
+
+int keyboard_irq = 1;
+char *password = "password123";
+
+
  
 static void test_skcipher_finish(struct skcipher_def *sk)
 {
@@ -66,31 +93,38 @@ static int test_skcipher_result(struct skcipher_def *sk, int rc)
     return rc;
 }
  
-static void test_skcipher_callback(struct crypto_async_request *req, int error)
+static void test_skcipher_callback(void *req, int error)
 {
-    struct tcrypt_result *result = req->data;
+    struct crypto_async_request *res = req;
+    struct tcrypt_result *result = res->data;
  
-    if (error == -EINPROGRESS)
+    if (error == -EINPROGRESS) {
+        pr_info("Error EINPROGRESS\n");
         return;
- 
+
+    }
+        
     result->err = error;
     complete(&result->completion);
     pr_info("Encryption finished successfully\n");
  
     /* Расшифровка данных. */
-#if 0
+
     memset((void*)sk.scratchpad, '-', CIPHER_BLOCK_SIZE);
-    ret = crypto_skcipher_decrypt(sk.req);
+    int ret = crypto_skcipher_decrypt(sk.req);
     ret = test_skcipher_result(&sk, ret);
-    if (ret)
+    if (ret) {
+        pr_info("Error test_skcipher_result\n");
         return;
+
+    }
  
     sg_copy_from_buffer(&sk.sg, 1, sk.scratchpad, CIPHER_BLOCK_SIZE);
     sk.scratchpad[CIPHER_BLOCK_SIZE-1] = 0;
  
     pr_info("Decryption request successful\n");
     pr_info("Decrypted: %s\n", sk.scratchpad);
-#endif
+
 }
  
 static int test_skcipher_encrypt(char *plaintext, char *password,
@@ -112,7 +146,7 @@ static int test_skcipher_encrypt(char *plaintext, char *password,
         if (!sk->req) {
             pr_info("could not allocate skcipher request\n");
             ret = -ENOMEM;
-            goto out;
+            return ret;
         }
     }
  
@@ -127,7 +161,7 @@ static int test_skcipher_encrypt(char *plaintext, char *password,
     if (crypto_skcipher_setkey(sk->tfm, key, SYMMETRIC_KEY_LENGTH)) {
         pr_info("key could not be set\n");
         ret = -EAGAIN;
-        goto out;
+        return ret;
     }
     pr_info("Symmetric key: %s\n", key);
     pr_info("Plaintext: %s\n", plaintext);
@@ -136,7 +170,7 @@ static int test_skcipher_encrypt(char *plaintext, char *password,
         sk->ivdata = kmalloc(CIPHER_BLOCK_SIZE, GFP_KERNEL);
         if (!sk->ivdata) {
             pr_info("could not allocate ivdata\n");
-            goto out;
+            return ret;
         }
         get_random_bytes(sk->ivdata, CIPHER_BLOCK_SIZE);
     }
@@ -146,7 +180,7 @@ static int test_skcipher_encrypt(char *plaintext, char *password,
         sk->scratchpad = kmalloc(CIPHER_BLOCK_SIZE, GFP_KERNEL);
         if (!sk->scratchpad) {
             pr_info("could not allocate scratchpad\n");
-            goto out;
+            return ret;;
         }
     }
     sprintf((char *)sk->scratchpad, "%s", plaintext);
@@ -160,35 +194,126 @@ static int test_skcipher_encrypt(char *plaintext, char *password,
     ret = crypto_skcipher_encrypt(sk->req);
     ret = test_skcipher_result(sk, ret);
     if (ret)
-        goto out;
- 
+        return ret;
+    
+    pr_info("Encrypted texted: %s\n", (char *)sk->scratchpad);
     pr_info("Encryption request successful\n");
  
-out:
+
     return ret;
 }
  
-static int cryptoapi_init(void)
+void work1_func(struct work_struct *work)
 {
-    char *password = "password123";
- 
+    my_work_struct_t *my_work = (my_work_struct_t *)work;
+    int code = my_work->code;
+
+    printk(KERN_INFO "MyWorkQueue: work1 begin");
+
+    if (code < 84)
+        printk(KERN_INFO "MyWorkQueue: the key is %s", ascii[code]);
+
+    printk(KERN_INFO "MyWorkQueue: work1 end");
+}
+
+irqreturn_t my_irq_handler(int irq, void *dev)
+{
+    int code;
+    printk(KERN_INFO "MyWorkQueue: my_irq_handler");
+
+    if (irq == keyboard_irq)
+    {
+        printk(KERN_INFO "MyWorkQueue: called by keyboard_irq");
+
+        code = inb(0x60);
+        work1->code = code;
+
+        unsigned char mesage[SYMMETRIC_KEY_LENGTH];
+
+        sprintf((char *)mesage, "MyWorkQueue: key code is %d", code);
+        
+        test_skcipher_encrypt((char *)mesage, password, &sk);
+
+
+        queue_work(my_wq, (struct work_struct *)work1);
+
+        return IRQ_HANDLED;
+    }
+
+    printk(KERN_INFO "MyWorkQueue: called not by keyboard_irq");
+
+    return IRQ_NONE;
+}
+
+static int __init my_workqueue_init(void)
+{
+    int ret;
+    
+
+
     sk.tfm = NULL;
     sk.req = NULL;
     sk.scratchpad = NULL;
     sk.ciphertext = NULL;
     sk.ivdata = NULL;
- 
-    test_skcipher_encrypt("Testing", password, &sk);
-    return 0;
+
+    ret = request_irq(keyboard_irq, my_irq_handler, IRQF_SHARED,
+                      "test_my_irq_handler", (void *) my_irq_handler);
+
+    printk(KERN_INFO "MyWorkQueue: init");
+    if (ret)
+    {
+        printk(KERN_ERR "MyWorkQueue: request_irq error");
+        return ret;
+    }
+    else
+    {
+        my_wq = alloc_workqueue("%s", __WQ_LEGACY | WQ_MEM_RECLAIM, 1, "my_wq");
+
+        if (my_wq == NULL)
+        {
+            printk(KERN_ERR "MyWorkQueue: create queue error");
+            ret = GFP_NOIO;
+            return ret;
+        }
+
+        work1 = kmalloc(sizeof(my_work_struct_t), GFP_KERNEL);
+        if (work1 == NULL)
+        {
+            printk(KERN_ERR "MyWorkQueue: work1 alloc error");
+            destroy_workqueue(my_wq);
+            ret = GFP_NOIO;
+            return ret;
+        }
+
+        INIT_WORK((struct work_struct *)work1, work1_func);
+        printk(KERN_ERR "MyWorkQueue: loaded");
+    }
+    return ret;
 }
- 
-static void cryptoapi_exit(void)
+
+static void __exit my_workqueue_exit(void)
 {
+    printk(KERN_INFO "MyWorkQueue: exit");
+
+    synchronize_irq(keyboard_irq); // ожидание завершения обработчика
+    free_irq(keyboard_irq, my_irq_handler); // освобождение линни от обработчика
+
+    flush_workqueue(my_wq);
+    destroy_workqueue(my_wq);
+    kfree(work1);
+
+    
+    printk(KERN_INFO "MyWorkQueue: unloaded");
+
     test_skcipher_finish(&sk);
+
+    printk(KERN_INFO "Crypto: unloaded");
 }
  
-module_init(cryptoapi_init);
-module_exit(cryptoapi_exit);
+module_init(my_workqueue_init);
+module_exit(my_workqueue_exit);
  
 MODULE_DESCRIPTION("Symmetric key encryption example");
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Kovel A.");
