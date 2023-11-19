@@ -51,7 +51,6 @@
 struct workqueue_struct {
 	struct list_head	pwqs;		/* WR: all pwqs of this wq */
 	struct list_head	list;		/* PR: list of all workqueues */
-
 	struct mutex		mutex;		/* protects this wq */
 	int			work_color;	/* WQ: current work color */
 	int			flush_color;	/* WQ: current flush color */
@@ -59,7 +58,6 @@ struct workqueue_struct {
 	struct wq_flusher	*first_flusher;	/* WQ: first flusher */
 	struct list_head	flusher_queue;	/* WQ: flush waiters */
 	struct list_head	flusher_overflow; /* WQ: flush overflow list */
-
 	struct list_head	maydays;	/* MD: pwqs requesting rescue */
 	struct worker		*rescuer;	/* MD: rescue worker */
 
@@ -119,4 +117,135 @@ struct work_struct {
 Во-вторых, можно с помощью функции queue\_work\_on указать процессор, на котором будет выполняться обработчик.
 
 
+\subsection{Шифрование}
 
+В ядре существуют специальные функции, отвечающие за регистрацию алгоритмов шифрования.
+
+\begin{lstlisting}[language=c, label=some-code, caption=Регистрация алгоритмов шифрования.]
+
+    /* include/linux/crypto.h */
+
+    int crypto_register_alg(struct crypto_alg *alg);
+    int crypto_register_algs(struct crypto_alg *algs, int count);
+    
+    int crypto_unregister_alg(struct crypto_alg *alg);
+    int crypto_unregister_algs(struct crypto_alg *algs, int count);
+
+\end{lstlisting}
+
+Эти функции возвращают отрицательное значение в случае ошибки, и 0 --- в случае успешного завершения,
+а регистрируемые алгоритмы описываются структурой crypto\_alg.
+
+\begin{lstlisting}[language=c, label=some-code, caption=Структура crypto\_alg]
+
+    /* include/linux/crypto.h */
+
+    struct crypto_alg {
+        struct list_head cra_list;
+        struct list_head cra_users;
+    
+        u32 cra_flags;
+        unsigned int cra_blocksize;
+        unsigned int cra_ctxsize;
+        unsigned int cra_alignmask;
+    
+        int cra_priority;
+        atomic_t cra_refcnt;
+    
+        char cra_name[CRYPTO_MAX_ALG_NAME];
+        char cra_driver_name[CRYPTO_MAX_ALG_NAME];
+    
+        const struct crypto_type *cra_type;
+    
+        union {
+            struct ablkcipher_alg ablkcipher;
+            struct blkcipher_alg blkcipher;
+            struct cipher_alg cipher;
+            struct compress_alg compress;
+        } cra_u;
+    
+        int (*cra_init)(struct crypto_tfm *tfm);
+        void (*cra_exit)(struct crypto_tfm *tfm);
+        void (*cra_destroy)(struct crypto_alg *alg);
+    
+        struct module *cra_module;
+    } CRYPTO_MINALIGN_ATTR;
+    
+\end{lstlisting}
+
+\begin{itemize}
+    \item cra\_flags: набор флагов, описывающих алгоритм.
+    \item cra\_blocksize: байтовый размер блока алгоритма. Все типы преобразований, кроме хэширования, возвращают ошибку при попытке обработать данные, размер которых меньше этого значения.
+    \item cra\_ctxsize: байтовый размер криптоконтекста. Ядро использует это значение при выделении памяти под контекст.
+    \item cra\_alignmask: маска выравнивания для входных и выходных данных. Буферы для входных и выходных данных алгоритма должны быть выровнены по этой маске.
+    \item cra\_priority: приоритет данной реализации алгоритма. Если в ядре зарегистрировано больше одного преобразования с одинаковым cra\_name, то, при обращении по этому имени, будет возвращён алгоритм с наибольшим приоритетом.
+    \item cra\_name: название алгоритма. Ядро использует это поле для поиска реализаций.
+    \item cra\_driver\_name: уникальное имя реализации алгоритма. 
+    \item cra\_type: тип криптопреобразования.
+    \item cra\_u: реализация алгоритма.
+    \item cra\_init: функция инициализации экземпляра преобразования. Эта функция вызывается единожды, во время создания экземпляра (сразу после выделения памяти под криптоконтекст).
+    \item cra\_exit: деинициализация экземпляра преобразования.
+\end{itemize}
+
+Но crypt\_alg является неполной структурой и сейчас используется усовершенствованный вариант struct skcipher\_alg.
+Ее также необходимо зарегистрировать как и crypto\_alg.
+
+\begin{lstlisting}[language=c, label=some-code, caption=Структура skcipher\_alg]
+
+    /* include/crypto/skcipher.h */
+
+struct skcipher_alg {
+    int (*setkey)(struct crypto_skcipher *tfm, const u8 *key,
+                  unsigned int keylen);
+    int (*encrypt)(struct skcipher_request *req);
+    int (*decrypt)(struct skcipher_request *req);
+    int (*init)(struct crypto_skcipher *tfm);
+    void (*exit)(struct crypto_skcipher *tfm);
+
+    unsigned int min_keysize;
+    unsigned int max_keysize;
+    unsigned int ivsize;
+    unsigned int chunksize;
+    unsigned int walksize;
+
+    struct crypto_alg base;
+};
+
+\end{lstlisting}
+
+В этой структуре используется crypto\_alg, описывающий алгоритм.
+Из важных полей тут:
+
+\begin{itemize}
+    \item chunksize: данное поле отвечает за размер блока шифрования (если этот блок не относится к поточным).
+    \item walksize: равен значению chunksize, за исключением случаев, когда алгоритм может параллельно обрабатывать несколько блоков, тогда walksize может быть больше, чем chunksize, но обязательно должен быть кратен ему.
+\end{itemize}
+
+Также в в функциях encrypt и decrypt присутствует структура skcipher\_request.
+Данная структура содержит данные, необходимые для выполнения операции симметричного шифрования.
+
+В Crypto API есть еще некоторые особенности.
+Например, все алгоритмы шифрования данных произвольной длины работают со входными данными не через указатели на байтовые массивы, а через структуру scatterlist.
+
+\begin{lstlisting}[language=c, label=some-code, caption=Структура skcipher\_alg]
+    /* include/linux/scatterlist.h */
+
+    struct scatterlist {
+        /* ... */
+        unsigned long   page_link;
+        unsigned int    offset;
+        unsigned int    length;
+        /* ... */
+    };
+\end{lstlisting}
+
+Экземпляр этой структуры можно проинициализировать указателем на некоторые данные. Например, при помощи вызова функции sg\_init\_one.
+В этой функции определяется страница памяти, с которой <<начинается>> buf (page\_link), и определяется смещение указателя buf относительно адреса начала страницы (offset).
+Таким образом, криптографическая подсистема работает напрямую со страницами памяти.
+
+\subsection*{Вывод}
+
+Были рассмотрены основополагающие материалы, которые в дальнейшем
+потребуются при реализации загружаемого модуля ядра. 
+Данные материалы помогут
+при реализации обработчика прерываний и его шифрования.
