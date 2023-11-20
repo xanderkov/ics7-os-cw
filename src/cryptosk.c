@@ -180,7 +180,7 @@ static int test_skcipher_encrypt(char *plaintext, char *password,
         sk->scratchpad = kmalloc(CIPHER_BLOCK_SIZE, GFP_KERNEL);
         if (!sk->scratchpad) {
             pr_info("could not allocate scratchpad\n");
-            return ret;;
+            return ret;
         }
     }
     sprintf((char *)sk->scratchpad, "%s", plaintext);
