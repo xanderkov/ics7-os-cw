@@ -359,3 +359,4 @@ dkms.conf
 *.fls
 *.log
 *.synctex.gz
+.DS_Store
